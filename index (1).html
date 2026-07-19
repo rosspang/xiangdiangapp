@@ -1,0 +1,1610 @@
+<!DOCTYPE html>
+<html lang="zh-Hant">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no" />
+<title>翔頂管理系統</title>
+<script src="https://cdn.tailwindcss.com"></script>
+<script type="importmap">
+{
+  "imports": {
+    "react": "https://esm.sh/react@18",
+    "react-dom/client": "https://esm.sh/react-dom@18/client",
+    "lucide-react": "https://esm.sh/lucide-react@0.383.0?external=react"
+  }
+}
+</script>
+<script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+<style>
+  html, body { margin: 0; padding: 0; background: #0B0B0D; }
+  #root { min-height: 100vh; }
+</style>
+</head>
+<body>
+<div id="root"></div>
+
+<!-- ---- 本機儲存模擬（讓程式在 Claude 平台以外也能運作） ---- -->
+<!-- 注意：資料只會存在使用者「自己的瀏覽器」裡，不會跨裝置 / 跨使用者同步 -->
+<script>
+  window.storage = {
+    async get(key, shared) {
+      const raw = localStorage.getItem(key);
+      if (raw === null) throw new Error("key not found: " + key);
+      return { key, value: raw, shared: !!shared };
+    },
+    async set(key, value, shared) {
+      localStorage.setItem(key, value);
+      return { key, value, shared: !!shared };
+    },
+    async delete(key, shared) {
+      localStorage.removeItem(key);
+      return { key, deleted: true, shared: !!shared };
+    },
+    async list(prefix, shared) {
+      const keys = Object.keys(localStorage).filter((k) => !prefix || k.startsWith(prefix));
+      return { keys, prefix, shared: !!shared };
+    },
+  };
+</script>
+
+<script type="text/babel" data-type="module" data-presets="react">
+import React, { useState, useEffect, useCallback } from "react";
+import { createRoot } from "react-dom/client";
+import {
+  Calendar,
+  Image as ImageIcon,
+  FileText,
+  Plus,
+  X,
+  MapPin,
+  Clock,
+  Trash2,
+  Inbox,
+  Send,
+  RotateCcw,
+  Users,
+  ChevronLeft,
+  ChevronRight,
+  Building2,
+  ArrowLeft,
+  LogOut,
+  Lock,
+  User as UserIcon,
+  Layers,
+  DollarSign,
+  Upload,
+  ImagePlus,
+  Download,
+} from "lucide-react";
+
+// ---- 設計 token（黑＋紅為主，琥珀金／綠／藍綠為功能性亮色） --------------
+const COLOR = {
+  bg: "#0B0B0D",         // 頁面底色（近黑）
+  surface: "#1A1A1D",    // 卡片／列表底色
+  surfaceAlt: "#000000", // 頁首／底部導覽（純黑）
+  border: "#2A2A2E",     // 卡片邊框
+  line: "#1C1C20",       // 底紋格線
+  red: "#E22E2E",        // 品牌紅（主要強調色／按鈕）
+  redDim: "#7A1B1C",     // 深紅（次要邊框）
+  ink: "#F4F3EF",        // 主要文字（近白）
+  muted: "#98989E",      // 次要文字（灰）
+  success: "#3FB27F",    // 出勤／已發文
+  gold: "#F2B705",       // 待處理狀態、警示提示
+  teal: "#2EC4B6",       // 分類用亮色
+};
+
+const CATS = [
+  { key: "灌漿", color: COLOR.red },
+  { key: "驗收", color: COLOR.success },
+  { key: "會議", color: COLOR.teal },
+  { key: "進場", color: COLOR.gold },
+  { key: "其他", color: COLOR.muted },
+];
+
+const ATTEND_STATUS = ["未記錄", "全天", "上午", "下午"];
+const ATTEND_COLOR = {
+  未記錄: COLOR.muted,
+  全天: COLOR.success,
+  上午: COLOR.teal,
+  下午: COLOR.gold,
+};
+
+// 將某一天（可能橫跨多個工地）的出勤紀錄，彙整成單一代表狀態
+function summarizeDayStatus(entries) {
+  if (entries.length === 0) return "未記錄";
+  if (entries.some((e) => e.session === "全天")) return "全天";
+  const sessions = new Set(entries.map((e) => e.session));
+  if (sessions.has("上午") && sessions.has("下午")) return "全天";
+  if (sessions.has("上午")) return "上午";
+  if (sessions.has("下午")) return "下午";
+  return "未記錄";
+}
+
+const APP_ID = "site-mgmt-01";
+const K_SITES = `${APP_ID}:sites`;
+const K_EVENTS = `${APP_ID}:events`;
+const K_PHOTOS = `${APP_ID}:photos`;
+const K_DOCS = `${APP_ID}:docs`;
+const K_WORKERS = `${APP_ID}:workers`;
+const K_ATTEND = `${APP_ID}:attendance`;
+const K_DRAWINGS = `${APP_ID}:drawings`;
+const K_VALUATIONS = `${APP_ID}:valuations`;
+
+const formatMoney = (n) => `NT$ ${Number(n || 0).toLocaleString("zh-TW")}`;
+const formatMonthLabel = (monthStr) => {
+  const [y, m] = monthStr.split("-");
+  return `${y}年${Number(m)}月`;
+};
+
+const uid = () => Math.random().toString(36).slice(2, 10);
+const pad2 = (n) => String(n).padStart(2, "0");
+const todayStr = () => {
+  const d = new Date();
+  return `${d.getFullYear()}-${pad2(d.getMonth() + 1)}-${pad2(d.getDate())}`;
+};
+const shiftDate = (dateStr, offset) => {
+  const [y, m, day] = dateStr.split("-").map(Number);
+  const d = new Date(y, m - 1, day);
+  d.setDate(d.getDate() + offset);
+  return `${d.getFullYear()}-${pad2(d.getMonth() + 1)}-${pad2(d.getDate())}`;
+};
+const formatDateLabel = (dateStr) => {
+  const d = new Date(dateStr + "T00:00:00");
+  const weekdays = ["日", "一", "二", "三", "四", "五", "六"];
+  return `${d.getMonth() + 1}/${d.getDate()}（週${weekdays[d.getDay()]}）`;
+};
+const shiftMonth = (monthStr, offset) => {
+  let [y, m] = monthStr.split("-").map(Number);
+  m += offset;
+  while (m > 12) { m -= 12; y += 1; }
+  while (m < 1) { m += 12; y -= 1; }
+  return `${y}-${pad2(m)}`;
+};
+
+const LOGO_URI = "data:image/png;base64,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";
+
+const inputStyle = { borderColor: COLOR.border, background: COLOR.surface, color: COLOR.ink, fontSize: "16px" };
+
+// ---- 共用小元件 --------------------------------------------------------
+function BlueprintBG({ children }) {
+  return (
+    <div
+      style={{
+        background: `${COLOR.bg} repeating-linear-gradient(0deg, ${COLOR.line} 0px, transparent 1px, transparent 28px, ${COLOR.line} 29px), repeating-linear-gradient(90deg, ${COLOR.line} 0px, transparent 1px, transparent 28px, ${COLOR.line} 29px)`,
+        backgroundSize: "29px 29px",
+        minHeight: "100vh",
+      }}
+      className="w-full"
+    >
+      {children}
+    </div>
+  );
+}
+
+function Stamp({ status }) {
+  const map = {
+    未發文: { color: COLOR.muted, label: "未發文" },
+    已發文: { color: COLOR.success, label: "已發文" },
+  };
+  const s = map[status] || map["未發文"];
+  return (
+    <span
+      style={{ color: s.color, borderColor: s.color, transform: "rotate(-4deg)", letterSpacing: "0.15em" }}
+      className="inline-block border-2 border-dashed rounded px-2 py-0.5 text-xs font-bold shrink-0"
+    >
+      {s.label}
+    </span>
+  );
+}
+
+function EmptyState({ icon: Icon, title, hint }) {
+  return (
+    <div className="flex flex-col items-center justify-center text-center py-16 px-6">
+      <Icon size={36} style={{ color: COLOR.muted }} strokeWidth={1.5} />
+      <p style={{ color: COLOR.ink }} className="mt-3 font-bold">{title}</p>
+      <p style={{ color: COLOR.muted }} className="text-sm mt-1">{hint}</p>
+    </div>
+  );
+}
+
+function Modal({ title, onClose, children }) {
+  return (
+    <div className="fixed inset-0 z-50 flex items-end sm:items-center justify-center">
+      <div className="absolute inset-0 bg-black/60" onClick={onClose} />
+      <div
+        style={{ background: COLOR.surface, borderColor: COLOR.border }}
+        className="relative w-full sm:max-w-sm rounded-t-2xl sm:rounded-2xl border p-5 max-h-[85vh] overflow-y-auto"
+      >
+        <div className="flex items-center justify-between mb-4">
+          <h3 style={{ color: COLOR.ink }} className="font-black text-lg">{title}</h3>
+          <button onClick={onClose} className="p-1"><X size={20} style={{ color: COLOR.muted }} /></button>
+        </div>
+        {children}
+      </div>
+    </div>
+  );
+}
+
+function FieldLabel({ children }) {
+  return <label style={{ color: COLOR.muted }} className="block text-xs font-bold tracking-wide mb-1">{children}</label>;
+}
+
+function AddBtn({ onClick, label }) {
+  return (
+    <button onClick={onClick} style={{ background: COLOR.red }} className="flex items-center gap-1 text-white text-xs font-bold rounded-full pl-2 pr-3 py-1.5">
+      <Plus size={14} /> {label}
+    </button>
+  );
+}
+
+// ---- 視窗縮放控制（一般畫面禁止縮放，看圖時才允許放大） ------------------
+function setViewportScale(allowZoom) {
+  try {
+    let meta = document.querySelector('meta[name="viewport"]');
+    if (!meta) {
+      meta = document.createElement("meta");
+      meta.name = "viewport";
+      document.head.appendChild(meta);
+    }
+    meta.content = allowZoom
+      ? "width=device-width, initial-scale=1"
+      : "width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no";
+  } catch (err) {
+    // 部分環境無法存取 document，安全略過
+  }
+}
+
+// ---- 圖片壓縮工具（上傳時自動縮小，避免資料過大） -------------------------
+function resizeImageFile(file, maxSize = 1000, quality = 0.75) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onerror = () => reject(new Error("讀取檔案失敗"));
+    reader.onload = () => {
+      const img = new Image();
+      img.onerror = () => reject(new Error("圖片載入失敗"));
+      img.onload = () => {
+        let { width, height } = img;
+        if (width > maxSize || height > maxSize) {
+          if (width > height) { height = Math.round((height * maxSize) / width); width = maxSize; }
+          else { width = Math.round((width * maxSize) / height); height = maxSize; }
+        }
+        const canvas = document.createElement("canvas");
+        canvas.width = width; canvas.height = height;
+        const ctx = canvas.getContext("2d");
+        ctx.drawImage(img, 0, 0, width, height);
+        resolve(canvas.toDataURL("image/jpeg", quality));
+      };
+      img.src = reader.result;
+    };
+    reader.readAsDataURL(file);
+  });
+}
+
+// ---- 圖片燈箱（可放大檢視） -----------------------------------------------
+function Lightbox({ url, onClose }) {
+  useEffect(() => {
+    setViewportScale(true);
+    return () => setViewportScale(false);
+  }, []);
+  const handleDownload = (e) => {
+    e.stopPropagation();
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = `翔頂管理系統-${Date.now()}.jpg`;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+  };
+  return (
+    <div onClick={onClose} className="fixed inset-0 z-[60] bg-black flex items-center justify-center p-4">
+      <img src={url} alt="" style={{ touchAction: "pinch-zoom" }} className="max-w-full max-h-full object-contain" />
+      <button onClick={handleDownload} style={{ background: COLOR.surface }} className="absolute top-4 right-16 p-2 rounded-full">
+        <Download size={18} color={COLOR.ink} />
+      </button>
+      <button onClick={onClose} style={{ background: COLOR.surface }} className="absolute top-4 right-4 p-2 rounded-full">
+        <X size={18} color={COLOR.ink} />
+      </button>
+    </div>
+  );
+}
+
+// ---- 開場動畫 -----------------------------------------------------------
+function Splash({ onDone }) {
+  useEffect(() => {
+    const t = setTimeout(onDone, 1600);
+    return () => clearTimeout(t);
+  }, []);
+  return (
+    <div onClick={onDone} style={{ background: COLOR.surfaceAlt }} className="fixed inset-0 z-50 flex flex-col items-center justify-center gap-3 cursor-pointer">
+      <style>{`
+        @keyframes splashIn { from { transform: scale(.8); opacity:0 } to { transform: scale(1); opacity:1 } }
+        .splash-mark { animation: splashIn .8s cubic-bezier(.34,1.56,.64,1) both; }
+      `}</style>
+      <div className="splash-mark w-24 h-24 rounded-2xl bg-white flex items-center justify-center p-3 shadow-lg">
+        <img src={LOGO_URI} alt="翔頂營造" className="w-full h-full object-contain" />
+      </div>
+      <div className="splash-mark text-center" style={{ animationDelay: ".15s" }}>
+        <p className="text-white font-black text-lg tracking-widest">翔頂管理系統</p>
+      </div>
+    </div>
+  );
+}
+
+// ---- 登入 ---------------------------------------------------------------
+function Login({ onLogin }) {
+  const [account, setAccount] = useState("");
+  const [password, setPassword] = useState("");
+  const ok = account.trim() && password.trim();
+  return (
+    <BlueprintBG>
+      <div className="min-h-screen flex items-center justify-center px-6">
+        <div style={{ background: COLOR.surface, borderColor: COLOR.border }} className="w-full max-w-xs border rounded-2xl p-6">
+          <div className="flex flex-col items-center mb-5">
+            <div className="w-16 h-16 rounded-xl bg-white flex items-center justify-center mb-2 p-2 shadow">
+              <img src={LOGO_URI} alt="翔頂營造" className="w-full h-full object-contain" />
+            </div>
+            <h1 style={{ color: COLOR.ink }} className="font-black text-lg">翔頂管理系統</h1>
+            <p style={{ color: COLOR.muted }} className="text-xs mt-1">請登入以繼續</p>
+          </div>
+          <div className="space-y-3">
+            <div>
+              <FieldLabel>帳號</FieldLabel>
+              <div className="relative">
+                <UserIcon size={15} style={{ color: COLOR.muted }} className="absolute left-3 top-1/2 -translate-y-1/2" />
+                <input value={account} onChange={(e) => setAccount(e.target.value)} placeholder="員工帳號"
+                  style={inputStyle} className="w-full border rounded-lg pl-9 pr-3 py-2 text-sm" />
+              </div>
+            </div>
+            <div>
+              <FieldLabel>密碼</FieldLabel>
+              <div className="relative">
+                <Lock size={15} style={{ color: COLOR.muted }} className="absolute left-3 top-1/2 -translate-y-1/2" />
+                <input type="password" value={password} onChange={(e) => setPassword(e.target.value)} placeholder="密碼"
+                  style={inputStyle} className="w-full border rounded-lg pl-9 pr-3 py-2 text-sm" />
+              </div>
+            </div>
+            <button
+              disabled={!ok}
+              onClick={() => onLogin(account.trim())}
+              style={{ background: ok ? COLOR.red : COLOR.redDim }}
+              className="w-full text-white font-bold rounded-lg py-2.5 mt-1"
+            >
+              登入
+            </button>
+          </div>
+        </div>
+      </div>
+    </BlueprintBG>
+  );
+}
+
+// ---- 頁首 ---------------------------------------------------------------
+function HomeHeader({ account, onLogout }) {
+  return (
+    <header style={{ background: COLOR.surfaceAlt }} className="px-5 pt-6 pb-5 rounded-b-3xl shadow-lg flex items-start justify-between">
+      <div className="flex items-center gap-3">
+        <div className="w-11 h-11 rounded-lg bg-white flex items-center justify-center p-1.5 shrink-0">
+          <img src={LOGO_URI} alt="翔頂營造" className="w-full h-full object-contain" />
+        </div>
+        <div>
+          <p style={{ color: COLOR.red, letterSpacing: "0.2em" }} className="text-xs font-bold">翔頂管理系統</p>
+          <h1 className="text-white text-xl font-black mt-0.5">首頁總覽</h1>
+          <p style={{ color: COLOR.muted }} className="text-xs mt-1">
+            {account ? `你好，${account}・` : ""}{formatDateLabel(todayStr())}
+          </p>
+        </div>
+      </div>
+      <button onClick={onLogout} style={{ background: COLOR.surface }} className="p-2 rounded-lg shrink-0">
+        <LogOut size={16} color={COLOR.ink} />
+      </button>
+    </header>
+  );
+}
+
+function BackHeader({ tag, title, subtitle, onBack, stats }) {
+  const pct = stats && stats.contractAmount > 0
+    ? Math.min(100, (stats.estimatedAmount / stats.contractAmount) * 100)
+    : 0;
+  return (
+    <header style={{ background: COLOR.surfaceAlt }} className="px-5 pt-6 pb-5 rounded-b-3xl shadow-lg">
+      <button onClick={onBack} className="flex items-center gap-1 mb-2" style={{ color: COLOR.muted }}>
+        <ArrowLeft size={15} /> <span className="text-xs">回首頁</span>
+      </button>
+      {tag && <p style={{ color: COLOR.red, letterSpacing: "0.15em" }} className="text-xs font-bold">{tag}</p>}
+      <h1 className="text-white text-xl font-black mt-0.5">{title}</h1>
+      {subtitle && (
+        <div className="flex items-center gap-1 mt-2" style={{ color: COLOR.muted }}>
+          <MapPin size={13} /><span className="text-xs">{subtitle}</span>
+        </div>
+      )}
+      {stats && (
+        <div className="mt-3">
+          <div className="grid grid-cols-2 gap-2">
+            <div style={{ background: COLOR.surface }} className="rounded-lg px-3 py-2">
+              <p style={{ color: COLOR.muted }} className="text-[10px] font-bold">契約金額</p>
+              <p className="text-white text-sm font-black mt-0.5">{formatMoney(stats.contractAmount)}</p>
+            </div>
+            <div style={{ background: COLOR.surface }} className="rounded-lg px-3 py-2">
+              <p style={{ color: COLOR.muted }} className="text-[10px] font-bold">已估驗金額</p>
+              <p style={{ color: COLOR.gold }} className="text-sm font-black mt-0.5">{formatMoney(stats.estimatedAmount)}</p>
+            </div>
+          </div>
+          {stats.contractAmount > 0 && (
+            <div style={{ background: COLOR.surface }} className="h-1.5 rounded-full mt-2 overflow-hidden">
+              <div style={{ background: COLOR.gold, width: `${pct}%` }} className="h-full rounded-full" />
+            </div>
+          )}
+        </div>
+      )}
+    </header>
+  );
+}
+
+function NavBtn({ active, label, icon: Icon, onClick }) {
+  return (
+    <button
+      onClick={onClick}
+      className="flex flex-col items-center gap-1 py-3"
+      style={{ color: active ? COLOR.red : COLOR.muted, borderTop: active ? `2px solid ${COLOR.red}` : "2px solid transparent", marginTop: "-2px" }}
+    >
+      <Icon size={20} strokeWidth={active ? 2.4 : 1.8} />
+      <span className="text-[11px] font-bold">{label}</span>
+    </button>
+  );
+}
+
+// ---- 首頁 ---------------------------------------------------------------
+function HomeView({ sites, events, workers, attendance, onEnterSite, onOpenWorker, onAddEvent, onAddSite }) {
+  const today = todayStr();
+  const upcoming = [...events].filter((e) => e.date >= today).sort((a, b) => a.date.localeCompare(b.date)).slice(0, 6);
+  const siteName = (id) => sites.find((s) => s.id === id)?.name || "";
+
+  return (
+    <div className="space-y-6">
+      {/* 行事曆總覽 */}
+      <section>
+        <div className="flex items-center justify-between mb-3">
+          <h2 style={{ color: COLOR.ink }} className="font-black text-base flex items-center gap-1.5">
+            <Calendar size={17} color={COLOR.red} /> 行事曆總覽
+          </h2>
+          <AddBtn onClick={onAddEvent} label="新增行程" />
+        </div>
+        {upcoming.length === 0 ? (
+          <EmptyState icon={Calendar} title="近期沒有行程" hint="點右上角新增，可選擇歸屬公司事務或工地" />
+        ) : (
+          <ul className="space-y-2">
+            {upcoming.map((ev) => {
+              const cat = CATS.find((c) => c.key === ev.cat) || CATS[4];
+              return (
+                <li key={ev.id} style={{ background: COLOR.surface, borderColor: COLOR.border }} className="border rounded-xl p-3 flex gap-3 items-start">
+                  <div style={{ background: cat.color }} className="w-1.5 self-stretch rounded-full shrink-0" />
+                  <div className="flex-1 min-w-0">
+                    <div className="flex items-center gap-1.5 flex-wrap">
+                      <span style={{ color: COLOR.ink }} className="font-bold text-sm">{ev.title}</span>
+                      <span style={{ color: cat.color, borderColor: cat.color }} className="text-[10px] border rounded px-1.5">{ev.cat}</span>
+                      <span style={{ color: COLOR.muted, borderColor: COLOR.border }} className="text-[10px] border rounded px-1.5 font-bold">
+                        {ev.siteId ? siteName(ev.siteId) : "公司事務"}
+                      </span>
+                    </div>
+                    <div style={{ color: COLOR.muted }} className="flex items-center gap-1 text-xs mt-1">
+                      <Clock size={12} /> {ev.date}
+                    </div>
+                  </div>
+                </li>
+              );
+            })}
+          </ul>
+        )}
+      </section>
+
+      {/* 工地分支 */}
+      <section>
+        <div className="flex items-center justify-between mb-3">
+          <h2 style={{ color: COLOR.ink }} className="font-black text-base flex items-center gap-1.5">
+            <Building2 size={17} color={COLOR.red} /> 工地
+          </h2>
+          <AddBtn onClick={onAddSite} label="新增工地" />
+        </div>
+        {sites.length === 0 ? (
+          <EmptyState icon={Building2} title="還沒有建立工地" hint="點右上角新增第一個工地" />
+        ) : (
+          <div className="space-y-2">
+            {sites.map((s) => (
+              <button key={s.id} onClick={() => onEnterSite(s.id)} style={{ background: COLOR.surface, borderColor: COLOR.border }} className="w-full border rounded-xl px-4 py-3 flex items-center gap-3 text-left">
+                <div style={{ background: COLOR.red }} className="w-1.5 self-stretch rounded-full shrink-0" />
+                <div className="min-w-0 flex-1">
+                  <p style={{ color: COLOR.ink }} className="font-bold text-sm truncate">{s.name}</p>
+                  {s.address && <p style={{ color: COLOR.muted }} className="text-xs mt-0.5 truncate">{s.address}</p>}
+                </div>
+                <ChevronRight size={18} color={COLOR.red} className="shrink-0" />
+              </button>
+            ))}
+          </div>
+        )}
+      </section>
+
+      {/* 出勤總覽（以人分類） */}
+      <section>
+        <h2 style={{ color: COLOR.ink }} className="font-black text-base flex items-center gap-1.5 mb-3">
+          <Users size={17} color={COLOR.red} /> 今日出勤（以人分類）
+        </h2>
+        {workers.length === 0 ? (
+          <EmptyState icon={Users} title="還沒有工人名冊" hint="請進入任一工地的「工班出勤」新增工人" />
+        ) : (
+          <ul className="space-y-2">
+            {workers.map((w) => {
+              const todayRecord = attendance[today] || {};
+              const entries = Object.keys(todayRecord)
+                .filter((k) => k.endsWith(`__${w.id}`) && todayRecord[k] !== "未記錄")
+                .map((k) => ({ siteId: k.split("__")[0], session: todayRecord[k] }));
+              const status = summarizeDayStatus(entries);
+              const detailText = entries.map((e) => `${siteName(e.siteId)}（${e.session}）`).join("、");
+              return (
+                <button key={w.id} onClick={() => onOpenWorker(w.id)} style={{ background: COLOR.surface, borderColor: COLOR.border }} className="w-full border rounded-xl p-3 flex items-center justify-between text-left">
+                  <div className="min-w-0">
+                    <p style={{ color: COLOR.ink }} className="font-bold text-sm">{w.name}</p>
+                    <p style={{ color: COLOR.muted }} className="text-xs truncate">{w.note ? w.note : (detailText || "點擊查看本月出勤")}</p>
+                  </div>
+                  <span style={{ color: ATTEND_COLOR[status], borderColor: ATTEND_COLOR[status] }} className="text-xs font-bold border-2 rounded-full px-3 py-1 shrink-0">
+                    {status}
+                  </span>
+                </button>
+              );
+            })}
+          </ul>
+        )}
+      </section>
+    </div>
+  );
+}
+
+// ---- 工人個人出勤頁 -------------------------------------------------------
+function WorkerDetailView({ worker, sites, attendance, monthStr, onMonthChange }) {
+  const [year, month] = monthStr.split("-").map(Number);
+  const firstWeekday = new Date(year, month - 1, 1).getDay();
+  const daysInMonth = new Date(year, month, 0).getDate();
+  const siteName = (id) => sites.find((s) => s.id === id)?.name || "";
+
+  const dayEntries = (d) => {
+    const dateStr = `${year}-${pad2(month)}-${pad2(d)}`;
+    const record = attendance[dateStr] || {};
+    const entries = Object.keys(record)
+      .filter((k) => k.endsWith(`__${worker.id}`) && record[k] !== "未記錄")
+      .map((k) => ({ siteId: k.split("__")[0], session: record[k] }));
+    return { dateStr, entries, status: summarizeDayStatus(entries) };
+  };
+
+  const cells = [];
+  for (let i = 0; i < firstWeekday; i++) cells.push(null);
+  for (let d = 1; d <= daysInMonth; d++) cells.push(d);
+
+  const counts = { 全天: 0, 上午: 0, 下午: 0 };
+  const recorded = [];
+  for (let d = 1; d <= daysInMonth; d++) {
+    const info = dayEntries(d);
+    if (info.status !== "未記錄") {
+      counts[info.status] += 1;
+      recorded.push({ day: d, ...info });
+    }
+  }
+  recorded.sort((a, b) => b.day - a.day);
+  const workDays = counts.全天 + counts.上午 * 0.5 + counts.下午 * 0.5;
+
+  const weekdayLabels = ["日", "一", "二", "三", "四", "五", "六"];
+
+  return (
+    <div>
+      <div style={{ background: COLOR.surfaceAlt }} className="flex items-center justify-between rounded-xl px-2 py-2 mb-4">
+        <button onClick={() => onMonthChange(shiftMonth(monthStr, -1))} className="p-2"><ChevronLeft size={18} color="#fff" /></button>
+        <p className="text-white font-bold text-sm">{year}年{month}月</p>
+        <button onClick={() => onMonthChange(shiftMonth(monthStr, 1))} className="p-2"><ChevronRight size={18} color="#fff" /></button>
+      </div>
+
+      <div className="flex gap-2 mb-2">
+        {["全天", "上午", "下午"].map((s) => (
+          <div key={s} style={{ borderColor: ATTEND_COLOR[s], color: ATTEND_COLOR[s] }} className="flex-1 border rounded-lg py-1.5 text-center">
+            <p className="text-base font-black leading-none">{counts[s]}</p>
+            <p className="text-[10px] font-bold mt-0.5">{s}</p>
+          </div>
+        ))}
+      </div>
+      <p style={{ color: COLOR.muted }} className="text-xs text-center mb-4">本月工作天數約 <span style={{ color: COLOR.ink }} className="font-bold">{workDays}</span> 天</p>
+
+      <div style={{ background: COLOR.surface, borderColor: COLOR.border }} className="border rounded-xl p-3 mb-4">
+        <div className="grid grid-cols-7 gap-1 mb-1">
+          {weekdayLabels.map((w) => (
+            <div key={w} style={{ color: COLOR.muted }} className="text-center text-[10px] font-bold py-1">{w}</div>
+          ))}
+        </div>
+        <div className="grid grid-cols-7 gap-1">
+          {cells.map((d, i) => {
+            if (d === null) return <div key={`b${i}`} />;
+            const info = dayEntries(d);
+            const isToday = info.dateStr === todayStr();
+            return (
+              <div
+                key={d}
+                style={{
+                  background: info.status === "未記錄" ? "transparent" : ATTEND_COLOR[info.status],
+                  color: info.status === "未記錄" ? COLOR.muted : "#fff",
+                  border: isToday ? `1px solid ${COLOR.red}` : "1px solid transparent",
+                }}
+                className="aspect-square rounded-md flex items-center justify-center text-xs font-bold"
+              >
+                {d}
+              </div>
+            );
+          })}
+        </div>
+      </div>
+
+      <h3 style={{ color: COLOR.ink }} className="font-bold text-sm mb-2">本月紀錄</h3>
+      {recorded.length === 0 ? (
+        <EmptyState icon={Users} title="本月尚無出勤紀錄" hint="請至各工地的工班出勤登記" />
+      ) : (
+        <ul className="space-y-2">
+          {recorded.map((r) => (
+            <li key={r.day} style={{ background: COLOR.surface, borderColor: COLOR.border }} className="border rounded-xl p-3">
+              <div className="flex items-center justify-between mb-1">
+                <p style={{ color: COLOR.ink }} className="font-bold text-sm">{month}/{r.day}</p>
+                <span style={{ color: ATTEND_COLOR[r.status], borderColor: ATTEND_COLOR[r.status] }} className="text-xs font-bold border-2 rounded-full px-3 py-1">
+                  {r.status}
+                </span>
+              </div>
+              {r.entries.map((e, i) => (
+                <p key={i} style={{ color: COLOR.muted }} className="text-xs">{siteName(e.siteId)}（{e.session}）</p>
+              ))}
+            </li>
+          ))}
+
+        </ul>
+      )}
+    </div>
+  );
+}
+
+// ---- 工地：行事曆 -------------------------------------------------------
+function CalendarTab({ events, onAdd, onRemove }) {
+  const today = todayStr();
+  return (
+    <div>
+      <div className="flex items-center justify-between mb-3">
+        <h2 style={{ color: COLOR.ink }} className="font-black text-base">工地行程</h2>
+        <AddBtn onClick={onAdd} label="新增行程" />
+      </div>
+      {events.length === 0 ? (
+        <EmptyState icon={Calendar} title="這個工地還沒有排定行程" hint="點右上角新增第一筆行程" />
+      ) : (
+        <ul className="space-y-2">
+          {events.map((ev) => {
+            const cat = CATS.find((c) => c.key === ev.cat) || CATS[4];
+            const isPast = ev.date < today;
+            return (
+              <li key={ev.id} style={{ background: COLOR.surface, borderColor: COLOR.border, opacity: isPast ? 0.5 : 1 }} className="border rounded-xl p-3 flex gap-3 items-start">
+                <div style={{ background: cat.color }} className="w-1.5 self-stretch rounded-full shrink-0" />
+                <div className="flex-1 min-w-0">
+                  <div className="flex items-center gap-2">
+                    <span style={{ color: COLOR.ink }} className="font-bold text-sm truncate">{ev.title}</span>
+                    <span style={{ color: cat.color, borderColor: cat.color }} className="text-[10px] border rounded px-1.5 shrink-0">{ev.cat}</span>
+                  </div>
+                  <div style={{ color: COLOR.muted }} className="flex items-center gap-1 text-xs mt-1"><Clock size={12} /> {ev.date}</div>
+                </div>
+                <button onClick={() => onRemove(ev.id)} className="p-1 shrink-0"><Trash2 size={15} style={{ color: COLOR.muted }} /></button>
+              </li>
+            );
+          })}
+        </ul>
+      )}
+    </div>
+  );
+}
+
+function EventModal({ sites, presetSiteId, onClose, onSave }) {
+  const isLocked = presetSiteId !== undefined;
+  const [title, setTitle] = useState("");
+  const [date, setDate] = useState(todayStr());
+  const [cat, setCat] = useState(CATS[0].key);
+  const [siteChoice, setSiteChoice] = useState("null");
+  const lockedSiteName = isLocked ? sites.find((s) => s.id === presetSiteId)?.name || "" : "";
+
+  return (
+    <Modal title="新增行程" onClose={onClose}>
+      <div className="space-y-3">
+        <div>
+          <FieldLabel>項目名稱</FieldLabel>
+          <input value={title} onChange={(e) => setTitle(e.target.value)}
+            style={inputStyle} className="w-full border rounded-lg px-3 py-2 text-sm" />
+        </div>
+        <div>
+          <FieldLabel>歸屬</FieldLabel>
+          {isLocked ? (
+            <div style={{ background: COLOR.surface, borderColor: COLOR.border, color: COLOR.ink }} className="border rounded-lg px-3 py-2 text-sm font-bold">
+              {lockedSiteName}（此工地）
+            </div>
+          ) : (
+            <select value={siteChoice} onChange={(e) => setSiteChoice(e.target.value)} style={inputStyle} className="w-full border rounded-lg px-3 py-2 text-sm">
+              <option value="null">公司事務（不屬於特定工地）</option>
+              {sites.map((s) => <option key={s.id} value={s.id}>{s.name}</option>)}
+            </select>
+          )}
+        </div>
+        <div>
+          <FieldLabel>日期</FieldLabel>
+          <input type="date" value={date} onChange={(e) => setDate(e.target.value)} style={inputStyle} className="w-full border rounded-lg px-3 py-2 text-sm" />
+        </div>
+        <div>
+          <FieldLabel>類別</FieldLabel>
+          <div className="flex flex-wrap gap-2">
+            {CATS.map((c) => (
+              <button key={c.key} onClick={() => setCat(c.key)}
+                style={{ background: cat === c.key ? c.color : COLOR.surface, color: cat === c.key ? "#fff" : c.color, borderColor: c.color }}
+                className="text-xs border rounded-full px-3 py-1 font-bold">
+                {c.key}
+              </button>
+            ))}
+          </div>
+        </div>
+        <button
+          disabled={!title.trim()}
+          onClick={() => onSave({
+            title: title.trim(), date, cat,
+            siteId: isLocked ? presetSiteId : (siteChoice === "null" ? null : siteChoice),
+          })}
+          style={{ background: title.trim() ? COLOR.red : COLOR.redDim }}
+          className="w-full text-white font-bold rounded-lg py-2.5 mt-2"
+        >
+          儲存行程
+        </button>
+      </div>
+    </Modal>
+  );
+}
+
+// ---- 工地：相簿 ---------------------------------------------------------
+function PhotosTab({ photos, onAdd, onRemove }) {
+  const [lightbox, setLightbox] = useState(null);
+  return (
+    <div>
+      <div className="flex items-center justify-between mb-3">
+        <h2 style={{ color: COLOR.ink }} className="font-black text-base">工地相簿</h2>
+        <AddBtn onClick={onAdd} label="新增照片" />
+      </div>
+      {photos.length === 0 ? (
+        <EmptyState icon={ImageIcon} title="這個工地還沒有照片" hint="點右上角新增第一張照片" />
+      ) : (
+        <div className="grid grid-cols-2 gap-3">
+          {photos.map((p) => (
+            <div key={p.id} style={{ background: COLOR.surface, borderColor: COLOR.border }} className="border rounded-xl overflow-hidden">
+              <button onClick={() => setLightbox(p.url)} className="block w-full">
+                <img src={p.url} alt={p.caption} className="w-full h-28 object-cover" />
+              </button>
+              <div className="p-2">
+                <p style={{ color: COLOR.ink }} className="text-xs font-bold truncate">{p.caption}</p>
+                <div className="flex items-center justify-between mt-1">
+                  <span style={{ color: COLOR.muted }} className="text-[10px]">{p.date}</span>
+                  <button onClick={() => onRemove(p.id)}><Trash2 size={13} style={{ color: COLOR.muted }} /></button>
+                </div>
+              </div>
+            </div>
+          ))}
+        </div>
+      )}
+      {lightbox && <Lightbox url={lightbox} onClose={() => setLightbox(null)} />}
+    </div>
+  );
+}
+
+function PhotoModal({ onClose, onSave }) {
+  const [url, setUrl] = useState("");
+  const [caption, setCaption] = useState("");
+  const [date, setDate] = useState(todayStr());
+  return (
+    <Modal title="新增照片" onClose={onClose}>
+      <div className="space-y-3">
+        <div>
+          <FieldLabel>圖片網址</FieldLabel>
+          <input value={url} onChange={(e) => setUrl(e.target.value)} placeholder="貼上圖片連結" style={inputStyle} className="w-full border rounded-lg px-3 py-2 text-sm" />
+        </div>
+        <div>
+          <FieldLabel>說明</FieldLabel>
+          <input value={caption} onChange={(e) => setCaption(e.target.value)} style={inputStyle} className="w-full border rounded-lg px-3 py-2 text-sm" />
+        </div>
+        <div>
+          <FieldLabel>日期</FieldLabel>
+          <input type="date" value={date} onChange={(e) => setDate(e.target.value)} style={inputStyle} className="w-full border rounded-lg px-3 py-2 text-sm" />
+        </div>
+        <button
+          disabled={!url.trim() || !caption.trim()}
+          onClick={() => onSave({ url: url.trim(), caption: caption.trim(), date })}
+          style={{ background: url.trim() && caption.trim() ? COLOR.red : COLOR.redDim }}
+          className="w-full text-white font-bold rounded-lg py-2.5 mt-2"
+        >
+          儲存照片
+        </button>
+      </div>
+    </Modal>
+  );
+}
+
+// ---- 工地：收發文 -------------------------------------------------------
+function DocsTab({ docs, onAdd, onToggleStatus, onRemove }) {
+  const [subTab, setSubTab] = useState("收文");
+  const [lightbox, setLightbox] = useState(null);
+  const filtered = docs.filter((d) => d.type === subTab);
+  return (
+    <div>
+      <div className="flex items-center justify-between mb-3">
+        <h2 style={{ color: COLOR.ink }} className="font-black text-base">收發文紀錄</h2>
+        <AddBtn onClick={onAdd} label="新增文件" />
+      </div>
+      <div className="flex gap-2 mb-3">
+        {["收文", "發文"].map((t) => (
+          <button key={t} onClick={() => setSubTab(t)}
+            style={{ background: subTab === t ? COLOR.red : COLOR.surface, color: subTab === t ? "#fff" : COLOR.ink, borderColor: subTab === t ? COLOR.red : COLOR.border }}
+            className="flex-1 border rounded-lg py-2 text-sm font-bold">
+            {t}
+          </button>
+        ))}
+      </div>
+      {filtered.length === 0 ? (
+        <EmptyState icon={FileText} title={`還沒有${subTab}紀錄`} hint={`點右上角新增第一筆${subTab}`} />
+      ) : (
+        <ul className="space-y-2">
+          {filtered.map((d) => (
+            <li key={d.id} style={{ background: COLOR.surface, borderColor: COLOR.border }} className="border rounded-xl p-3">
+              <div className="flex items-start justify-between gap-2">
+                <div className="flex items-center gap-1.5">
+                  {d.type === "收文" ? <Inbox size={14} style={{ color: COLOR.ink }} /> : <Send size={14} style={{ color: COLOR.red }} />}
+                  <span style={{ color: COLOR.ink }} className="font-bold text-sm">{d.title}</span>
+                </div>
+                {d.type === "發文" && (
+                  <button onClick={() => onToggleStatus(d.id)}><Stamp status={d.status} /></button>
+                )}
+              </div>
+              <p style={{ color: COLOR.muted }} className="text-xs mt-1.5">{d.who} ・ {d.date}</p>
+              {d.imageUrl && (
+                <button onClick={() => setLightbox(d.imageUrl)} className="mt-2 block">
+                  <img src={d.imageUrl} alt="附件" className="w-full h-28 object-cover rounded-lg" />
+                </button>
+              )}
+              <div className="flex justify-end mt-1">
+                <button onClick={() => onRemove(d.id)}><Trash2 size={13} style={{ color: COLOR.muted }} /></button>
+              </div>
+            </li>
+          ))}
+        </ul>
+      )}
+      {subTab === "發文" && (
+        <p style={{ color: COLOR.muted }} className="text-[11px] text-center mt-3">點狀態章可切換：未發文 ↔ 已發文</p>
+      )}
+      {lightbox && <Lightbox url={lightbox} onClose={() => setLightbox(null)} />}
+    </div>
+  );
+}
+
+function DocModal({ onClose, onSave }) {
+  const [type, setType] = useState("收文");
+  const [title, setTitle] = useState("");
+  const [who, setWho] = useState("");
+  const [date, setDate] = useState(todayStr());
+  const [imageUrl, setImageUrl] = useState("");
+  const [uploading, setUploading] = useState(false);
+
+  const handleFile = async (e) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    setUploading(true);
+    try {
+      const dataUrl = await resizeImageFile(file);
+      setImageUrl(dataUrl);
+    } catch (err) {
+      console.error("圖片處理失敗", err);
+    } finally {
+      setUploading(false);
+    }
+  };
+
+  return (
+    <Modal title="新增文件" onClose={onClose}>
+      <div className="space-y-3">
+        <div className="flex gap-2">
+          {["收文", "發文"].map((t) => (
+            <button key={t} onClick={() => setType(t)}
+              style={{ background: type === t ? COLOR.red : COLOR.surface, color: type === t ? "#fff" : COLOR.ink, borderColor: type === t ? COLOR.red : COLOR.border }}
+              className="flex-1 border rounded-lg py-2 text-sm font-bold">
+              {t}
+            </button>
+          ))}
+        </div>
+        <div>
+          <FieldLabel>文件主旨</FieldLabel>
+          <input value={title} onChange={(e) => setTitle(e.target.value)} style={inputStyle} className="w-full border rounded-lg px-3 py-2 text-sm" />
+        </div>
+        <div>
+          <FieldLabel>{type === "收文" ? "來文單位" : "受文單位"}</FieldLabel>
+          <input value={who} onChange={(e) => setWho(e.target.value)} style={inputStyle} className="w-full border rounded-lg px-3 py-2 text-sm" />
+        </div>
+        <div>
+          <FieldLabel>日期</FieldLabel>
+          <input type="date" value={date} onChange={(e) => setDate(e.target.value)} style={inputStyle} className="w-full border rounded-lg px-3 py-2 text-sm" />
+        </div>
+        <div>
+          <FieldLabel>附件圖片（選填）</FieldLabel>
+          {imageUrl ? (
+            <div className="relative">
+              <img src={imageUrl} alt="附件預覽" className="w-full h-36 object-cover rounded-lg" />
+              <button onClick={() => setImageUrl("")} style={{ background: COLOR.surfaceAlt }} className="absolute top-2 right-2 p-1.5 rounded-full">
+                <X size={14} color="#fff" />
+              </button>
+            </div>
+          ) : (
+            <label style={{ borderColor: COLOR.border, color: COLOR.muted }} className="flex flex-col items-center justify-center gap-1.5 border border-dashed rounded-lg py-6 cursor-pointer">
+              <input type="file" accept="image/*" capture="environment" onChange={handleFile} className="hidden" />
+              {uploading ? <span className="text-xs">處理中…</span> : (
+                <>
+                  <Upload size={20} />
+                  <span className="text-xs">拍照或選擇圖片上傳</span>
+                </>
+              )}
+            </label>
+          )}
+        </div>
+        <button
+          disabled={!title.trim()}
+          onClick={() => onSave({ type, title: title.trim(), who: who.trim() || "未填寫", date, imageUrl, status: type === "發文" ? "未發文" : undefined })}
+          style={{ background: title.trim() ? COLOR.red : COLOR.redDim }}
+          className="w-full text-white font-bold rounded-lg py-2.5 mt-2"
+        >
+          儲存文件
+        </button>
+      </div>
+    </Modal>
+  );
+}
+
+// ---- 工地：圖說 ---------------------------------------------------------
+function DrawingsTab({ drawings, onAdd, onRemove }) {
+  return (
+    <div>
+      <div className="flex items-center justify-between mb-3">
+        <h2 style={{ color: COLOR.ink }} className="font-black text-base">圖說文件</h2>
+        <AddBtn onClick={onAdd} label="新增圖說" />
+      </div>
+      {drawings.length === 0 ? (
+        <EmptyState icon={Layers} title="這個工地還沒有圖說" hint="點右上角新增第一份圖說" />
+      ) : (
+        <ul className="space-y-2">
+          {drawings.map((dw) => (
+            <li key={dw.id} style={{ background: COLOR.surface, borderColor: COLOR.border }} className="border rounded-xl p-3">
+              <div className="flex items-start justify-between gap-2">
+                <div className="flex items-center gap-1.5 min-w-0">
+                  <Layers size={14} style={{ color: COLOR.red }} className="shrink-0" />
+                  <span style={{ color: COLOR.ink }} className="font-bold text-sm truncate">{dw.title}</span>
+                </div>
+                <button onClick={() => onRemove(dw.id)} className="shrink-0"><Trash2 size={13} style={{ color: COLOR.muted }} /></button>
+              </div>
+              <p style={{ color: COLOR.muted }} className="text-xs mt-1.5">
+                {dw.version ? `${dw.version} ・ ` : ""}{dw.date}
+              </p>
+              {dw.url && (
+                <a href={dw.url} target="_blank" rel="noopener noreferrer"
+                  style={{ color: COLOR.gold, borderColor: COLOR.gold }}
+                  className="inline-block text-xs font-bold border rounded px-2 py-1 mt-2">
+                  開啟圖說連結
+                </a>
+              )}
+            </li>
+          ))}
+        </ul>
+      )}
+    </div>
+  );
+}
+
+function DrawingModal({ onClose, onSave }) {
+  const [title, setTitle] = useState("");
+  const [version, setVersion] = useState("");
+  const [date, setDate] = useState(todayStr());
+  const [url, setUrl] = useState("");
+  return (
+    <Modal title="新增圖說" onClose={onClose}>
+      <div className="space-y-3">
+        <div>
+          <FieldLabel>圖說名稱</FieldLabel>
+          <input value={title} onChange={(e) => setTitle(e.target.value)} style={inputStyle} className="w-full border rounded-lg px-3 py-2 text-sm" />
+        </div>
+        <div>
+          <FieldLabel>版次（選填）</FieldLabel>
+          <input value={version} onChange={(e) => setVersion(e.target.value)} style={inputStyle} className="w-full border rounded-lg px-3 py-2 text-sm" />
+        </div>
+        <div>
+          <FieldLabel>日期</FieldLabel>
+          <input type="date" value={date} onChange={(e) => setDate(e.target.value)} style={inputStyle} className="w-full border rounded-lg px-3 py-2 text-sm" />
+        </div>
+        <div>
+          <FieldLabel>連結（選填）</FieldLabel>
+          <input value={url} onChange={(e) => setUrl(e.target.value)} placeholder="貼上雲端硬碟或圖檔連結" style={inputStyle} className="w-full border rounded-lg px-3 py-2 text-sm" />
+        </div>
+        <button
+          disabled={!title.trim()}
+          onClick={() => onSave({ title: title.trim(), version: version.trim(), date, url: url.trim() })}
+          style={{ background: title.trim() ? COLOR.red : COLOR.redDim }}
+          className="w-full text-white font-bold rounded-lg py-2.5 mt-2"
+        >
+          儲存圖說
+        </button>
+      </div>
+    </Modal>
+  );
+}
+
+// ---- 工地：估驗 ---------------------------------------------------------
+function ValuationsTab({ valuations, contractAmount, onAdd, onRemove }) {
+  const total = valuations.reduce((sum, v) => sum + Number(v.amount || 0), 0);
+  const pct = contractAmount > 0 ? Math.min(100, (total / contractAmount) * 100) : 0;
+  const sorted = [...valuations].sort((a, b) => b.month.localeCompare(a.month));
+  return (
+    <div>
+      <div className="flex items-center justify-between mb-3">
+        <h2 style={{ color: COLOR.ink }} className="font-black text-base">估驗紀錄</h2>
+        <AddBtn onClick={onAdd} label="新增估驗" />
+      </div>
+
+      <div style={{ background: COLOR.surface, borderColor: COLOR.border }} className="border rounded-xl p-3 mb-3">
+        <div className="flex items-center justify-between">
+          <div>
+            <p style={{ color: COLOR.muted }} className="text-[10px] font-bold">已估驗金額</p>
+            <p style={{ color: COLOR.gold }} className="text-base font-black mt-0.5">{formatMoney(total)}</p>
+          </div>
+          <div className="text-right">
+            <p style={{ color: COLOR.muted }} className="text-[10px] font-bold">契約金額</p>
+            <p style={{ color: COLOR.ink }} className="text-base font-black mt-0.5">{formatMoney(contractAmount)}</p>
+          </div>
+        </div>
+        {contractAmount > 0 && (
+          <div style={{ background: COLOR.bg }} className="h-1.5 rounded-full mt-2 overflow-hidden">
+            <div style={{ background: COLOR.gold, width: `${pct}%` }} className="h-full rounded-full" />
+          </div>
+        )}
+      </div>
+
+      {sorted.length === 0 ? (
+        <EmptyState icon={DollarSign} title="還沒有估驗紀錄" hint="點右上角新增第一筆月估驗" />
+      ) : (
+        <ul className="space-y-2">
+          {sorted.map((v) => (
+            <li key={v.id} style={{ background: COLOR.surface, borderColor: COLOR.border }} className="border rounded-xl p-3 flex items-center justify-between">
+              <div className="flex items-center gap-1.5">
+                <DollarSign size={14} style={{ color: COLOR.red }} />
+                <span style={{ color: COLOR.ink }} className="font-bold text-sm">{formatMonthLabel(v.month)}</span>
+              </div>
+              <div className="flex items-center gap-2">
+                <span style={{ color: COLOR.gold }} className="font-bold text-sm">{formatMoney(v.amount)}</span>
+                <button onClick={() => onRemove(v.id)}><Trash2 size={13} style={{ color: COLOR.muted }} /></button>
+              </div>
+            </li>
+          ))}
+        </ul>
+      )}
+    </div>
+  );
+}
+
+function ValuationModal({ onClose, onSave }) {
+  const [month, setMonth] = useState(todayStr().slice(0, 7));
+  const [amount, setAmount] = useState("");
+  return (
+    <Modal title="新增估驗" onClose={onClose}>
+      <div className="space-y-3">
+        <div>
+          <FieldLabel>月份</FieldLabel>
+          <input type="month" value={month} onChange={(e) => setMonth(e.target.value)} style={inputStyle} className="w-full border rounded-lg px-3 py-2 text-sm" />
+        </div>
+        <div>
+          <FieldLabel>估驗金額</FieldLabel>
+          <input type="number" value={amount} onChange={(e) => setAmount(e.target.value)} placeholder="請輸入金額" style={inputStyle} className="w-full border rounded-lg px-3 py-2 text-sm" />
+        </div>
+        <button
+          disabled={!month || !amount}
+          onClick={() => onSave({ month, amount: Number(amount) })}
+          style={{ background: month && amount ? COLOR.red : COLOR.redDim }}
+          className="w-full text-white font-bold rounded-lg py-2.5 mt-2"
+        >
+          儲存估驗
+        </button>
+      </div>
+    </Modal>
+  );
+}
+
+// ---- 工地：工班出勤 ------------------------------------------------------
+function AttendanceTab({ workers, attendance, siteId, date, onDateChange, onCycle, onMarkAll, onAddWorker, onRemoveWorker }) {
+  const dayRecord = attendance[date] || {};
+  const statusOf = (workerId) => dayRecord[`${siteId}__${workerId}`] || "未記錄";
+  const presentCount = workers.filter((w) => statusOf(w.id) !== "未記錄").length;
+
+  return (
+    <div>
+      <div className="flex items-center justify-between mb-3">
+        <h2 style={{ color: COLOR.ink }} className="font-black text-base">工班出勤</h2>
+        <AddBtn onClick={onAddWorker} label="新增工人" />
+      </div>
+
+      <div style={{ background: COLOR.surfaceAlt }} className="flex items-center justify-between rounded-xl px-2 py-2 mb-3">
+        <button onClick={() => onDateChange(shiftDate(date, -1))} className="p-2"><ChevronLeft size={18} color="#fff" /></button>
+        <div className="text-center">
+          <p className="text-white font-bold text-sm">{formatDateLabel(date)}</p>
+          {date !== todayStr() && (
+            <button onClick={() => onDateChange(todayStr())} style={{ color: COLOR.red }} className="text-[11px] font-bold">回到今天</button>
+          )}
+        </div>
+        <button onClick={() => onDateChange(shiftDate(date, 1))} className="p-2"><ChevronRight size={18} color="#fff" /></button>
+      </div>
+
+      <p style={{ color: COLOR.muted }} className="text-[11px] text-center mb-3">點工人右側按鈕可切換：未記錄 → 全天 → 上午 → 下午</p>
+
+      <div className="flex items-center justify-between mb-3">
+        <p style={{ color: COLOR.ink }} className="text-sm">
+          <span style={{ color: COLOR.success }} className="font-black text-base">{presentCount}</span> / {workers.length} 人已標記
+        </p>
+        {workers.length > 0 && (
+          <button onClick={onMarkAll} style={{ background: COLOR.success }} className="text-white text-xs font-bold rounded-full px-3 py-1.5">
+            全部標記全天
+          </button>
+        )}
+      </div>
+
+      {workers.length === 0 ? (
+        <EmptyState icon={Users} title="還沒有工人名冊" hint="點右上角新增第一位工人" />
+      ) : (
+        <ul className="space-y-2">
+          {workers.map((w) => {
+            const status = statusOf(w.id);
+            return (
+              <li key={w.id} style={{ background: COLOR.surface, borderColor: COLOR.border }} className="border rounded-xl p-3 flex items-center justify-between">
+                <div className="min-w-0">
+                  <p style={{ color: COLOR.ink }} className="font-bold text-sm truncate">{w.name}</p>
+                  {w.note && <p style={{ color: COLOR.muted }} className="text-xs">{w.note}</p>}
+                </div>
+                <div className="flex items-center gap-2 shrink-0">
+                  <button
+                    onClick={() => onCycle(w.id)}
+                    style={{
+                      background: status === "未記錄" ? "transparent" : ATTEND_COLOR[status],
+                      color: status === "未記錄" ? ATTEND_COLOR[status] : "#fff",
+                      borderColor: ATTEND_COLOR[status],
+                    }}
+                    className="text-xs font-bold border-2 rounded-full px-3 py-1 min-w-[64px]"
+                  >
+                    {status}
+                  </button>
+                  <button onClick={() => onRemoveWorker(w.id)}><Trash2 size={14} style={{ color: COLOR.muted }} /></button>
+                </div>
+              </li>
+            );
+          })}
+        </ul>
+      )}
+    </div>
+  );
+}
+
+function WorkerModal({ onClose, onSave }) {
+  const [name, setName] = useState("");
+  const [note, setNote] = useState("");
+  return (
+    <Modal title="新增工人" onClose={onClose}>
+      <div className="space-y-3">
+        <div>
+          <FieldLabel>姓名</FieldLabel>
+          <input value={name} onChange={(e) => setName(e.target.value)} style={inputStyle} className="w-full border rounded-lg px-3 py-2 text-sm" />
+        </div>
+        <div>
+          <FieldLabel>備註（選填）</FieldLabel>
+          <input value={note} onChange={(e) => setNote(e.target.value)} style={inputStyle} className="w-full border rounded-lg px-3 py-2 text-sm" />
+        </div>
+        <button
+          disabled={!name.trim()}
+          onClick={() => onSave({ name: name.trim(), note: note.trim() })}
+          style={{ background: name.trim() ? COLOR.red : COLOR.redDim }}
+          className="w-full text-white font-bold rounded-lg py-2.5 mt-2"
+        >
+          儲存工人
+        </button>
+      </div>
+    </Modal>
+  );
+}
+
+function SiteModal({ onClose, onSave }) {
+  const [name, setName] = useState("");
+  const [address, setAddress] = useState("");
+  const [contractAmount, setContractAmount] = useState("");
+  return (
+    <Modal title="新增工地" onClose={onClose}>
+      <div className="space-y-3">
+        <div>
+          <FieldLabel>工地名稱</FieldLabel>
+          <input value={name} onChange={(e) => setName(e.target.value)} style={inputStyle} className="w-full border rounded-lg px-3 py-2 text-sm" />
+        </div>
+        <div>
+          <FieldLabel>地址／備註（選填）</FieldLabel>
+          <input value={address} onChange={(e) => setAddress(e.target.value)} style={inputStyle} className="w-full border rounded-lg px-3 py-2 text-sm" />
+        </div>
+        <div>
+          <FieldLabel>契約金額（選填）</FieldLabel>
+          <input type="number" value={contractAmount} onChange={(e) => setContractAmount(e.target.value)} placeholder="請輸入金額" style={inputStyle} className="w-full border rounded-lg px-3 py-2 text-sm" />
+        </div>
+        <button
+          disabled={!name.trim()}
+          onClick={() => onSave({ name: name.trim(), address: address.trim(), contractAmount: Number(contractAmount) || 0 })}
+          style={{ background: name.trim() ? COLOR.red : COLOR.redDim }}
+          className="w-full text-white font-bold rounded-lg py-2.5 mt-2"
+        >
+          建立工地
+        </button>
+      </div>
+    </Modal>
+  );
+}
+
+// ---- 種子資料 ------------------------------------------------------------
+function buildSeed() {
+  const sites = [
+    { id: "site-a", name: "中心新村", address: "", contractAmount: 88000000 },
+    { id: "site-b", name: "土城國中", address: "", contractAmount: 45000000 },
+    { id: "site-c", name: "預約維護", address: "", contractAmount: 1200000 },
+  ];
+  const d = (offset) => shiftDate(todayStr(), offset);
+  const events = [
+    { id: uid(), title: "測試", date: d(2), cat: "會議", siteId: null },
+    { id: uid(), title: "測試", date: d(5), cat: "其他", siteId: null },
+    { id: uid(), title: "測試", date: d(1), cat: "其他", siteId: "site-a" },
+    { id: uid(), title: "測試", date: d(3), cat: "灌漿", siteId: "site-a" },
+    { id: uid(), title: "測試", date: d(6), cat: "驗收", siteId: "site-a" },
+    { id: uid(), title: "測試", date: d(2), cat: "進場", siteId: "site-b" },
+    { id: uid(), title: "測試", date: d(4), cat: "其他", siteId: "site-c" },
+  ];
+  const photos = [
+    { id: uid(), url: "https://picsum.photos/seed/sitex1/400/300", caption: "測試", date: todayStr(), siteId: "site-a" },
+    { id: uid(), url: "https://picsum.photos/seed/sitex2/400/300", caption: "測試", date: todayStr(), siteId: "site-a" },
+    { id: uid(), url: "https://picsum.photos/seed/sitex3/400/300", caption: "測試", date: todayStr(), siteId: "site-b" },
+  ];
+  const docs = [
+    { id: uid(), type: "收文", title: "測試", who: "監造單位", date: todayStr(), siteId: "site-a" },
+    { id: uid(), type: "發文", title: "測試", who: "業主", date: todayStr(), status: "已發文", siteId: "site-a" },
+    { id: uid(), type: "收文", title: "測試", who: "廠商", date: todayStr(), siteId: "site-b" },
+  ];
+  const roster = ["韓明義", "陳振平", "李忠安", "葉漢濱", "周明宗", "王鴻昌", "林克任"];
+  const workers = roster.map((name) => ({ id: uid(), name, note: "" }));
+  const drawings = [
+    { id: uid(), title: "測試", version: "Rev.C", date: todayStr(), url: "", siteId: "site-a" },
+    { id: uid(), title: "測試", version: "Rev.A", date: todayStr(), url: "", siteId: "site-a" },
+  ];
+  const thisMonth = todayStr().slice(0, 7);
+  const valuations = [
+    { id: uid(), month: shiftMonth(thisMonth, -2), amount: 15000000, siteId: "site-a" },
+    { id: uid(), month: shiftMonth(thisMonth, -1), amount: 20000000, siteId: "site-a" },
+    { id: uid(), month: shiftMonth(thisMonth, -1), amount: 8000000, siteId: "site-b" },
+  ];
+  return { sites, events, photos, docs, workers, attendance: {}, drawings, valuations };
+}
+
+// ---- 主程式 ------------------------------------------------------------
+function ConstructionApp() {
+  const [view, setView] = useState("splash"); // splash | login | home | site | worker
+  const [account, setAccount] = useState("");
+  const [currentSiteId, setCurrentSiteId] = useState(null);
+  const [currentWorkerId, setCurrentWorkerId] = useState(null);
+  const [siteTab, setSiteTab] = useState("calendar");
+  const [workerMonth, setWorkerMonth] = useState(todayStr().slice(0, 7));
+  const [loading, setLoading] = useState(true);
+
+  const [sites, setSites] = useState([]);
+  const [events, setEvents] = useState([]);
+  const [photos, setPhotos] = useState([]);
+  const [docs, setDocs] = useState([]);
+  const [workers, setWorkers] = useState([]);
+  const [attendance, setAttendance] = useState({});
+  const [attDate, setAttDate] = useState(todayStr());
+  const [drawings, setDrawings] = useState([]);
+  const [valuations, setValuations] = useState([]);
+
+  const [modal, setModal] = useState(null);
+  const [toast, setToast] = useState("");
+
+  const showToast = (msg) => { setToast(msg); setTimeout(() => setToast(""), 1800); };
+
+  useEffect(() => {
+    setViewportScale(false);
+  }, []);
+
+  useEffect(() => {
+    (async () => {
+      const seed = buildSeed();
+      try {
+        const [s, e, p, d, w, a, dw, vl] = await Promise.allSettled([
+          window.storage.get(K_SITES, true),
+          window.storage.get(K_EVENTS, true),
+          window.storage.get(K_PHOTOS, true),
+          window.storage.get(K_DOCS, true),
+          window.storage.get(K_WORKERS, true),
+          window.storage.get(K_ATTEND, true),
+          window.storage.get(K_DRAWINGS, true),
+          window.storage.get(K_VALUATIONS, true),
+        ]);
+        setSites(s.status === "fulfilled" && s.value ? JSON.parse(s.value.value) : seed.sites);
+        setEvents(e.status === "fulfilled" && e.value ? JSON.parse(e.value.value) : seed.events);
+        setPhotos(p.status === "fulfilled" && p.value ? JSON.parse(p.value.value) : seed.photos);
+        setDocs(d.status === "fulfilled" && d.value ? JSON.parse(d.value.value) : seed.docs);
+        setWorkers(w.status === "fulfilled" && w.value ? JSON.parse(w.value.value) : seed.workers);
+        setAttendance(a.status === "fulfilled" && a.value ? JSON.parse(a.value.value) : seed.attendance);
+        setDrawings(dw.status === "fulfilled" && dw.value ? JSON.parse(dw.value.value) : seed.drawings);
+        setValuations(vl.status === "fulfilled" && vl.value ? JSON.parse(vl.value.value) : seed.valuations);
+      } catch (err) {
+        console.error("讀取失敗", err);
+        setSites(seed.sites); setEvents(seed.events); setPhotos(seed.photos);
+        setDocs(seed.docs); setWorkers(seed.workers); setAttendance(seed.attendance);
+        setDrawings(seed.drawings); setValuations(seed.valuations);
+      } finally {
+        setLoading(false);
+      }
+    })();
+  }, []);
+
+  const persist = useCallback(async (key, value) => {
+    try { await window.storage.set(key, JSON.stringify(value), true); }
+    catch (err) { console.error("儲存失敗", err); }
+  }, []);
+
+  const addSite = (s) => {
+    const next = [...sites, { id: uid(), ...s }];
+    setSites(next); persist(K_SITES, next); showToast("已新增工地");
+  };
+
+  const addEvent = (ev) => {
+    const next = [...events, { id: uid(), ...ev }].sort((a, b) => a.date.localeCompare(b.date));
+    setEvents(next); persist(K_EVENTS, next); showToast("已新增行程");
+  };
+  const removeEvent = (id) => {
+    const next = events.filter((e) => e.id !== id);
+    setEvents(next); persist(K_EVENTS, next);
+  };
+
+  const addPhoto = (ph) => {
+    const next = [{ id: uid(), ...ph }, ...photos];
+    setPhotos(next); persist(K_PHOTOS, next); showToast("已新增照片");
+  };
+  const removePhoto = (id) => {
+    const next = photos.filter((p) => p.id !== id);
+    setPhotos(next); persist(K_PHOTOS, next);
+  };
+
+  const addDoc = (dc) => {
+    const next = [{ id: uid(), ...dc }, ...docs];
+    setDocs(next); persist(K_DOCS, next); showToast("已新增文件");
+  };
+  const toggleDocStatus = (id) => {
+    const next = docs.map((d) => d.id === id && d.type === "發文" ? { ...d, status: d.status === "已發文" ? "未發文" : "已發文" } : d);
+    setDocs(next); persist(K_DOCS, next);
+  };
+  const removeDoc = (id) => {
+    const next = docs.filter((d) => d.id !== id);
+    setDocs(next); persist(K_DOCS, next);
+  };
+
+  const addWorker = (wk) => {
+    const next = [...workers, { id: uid(), ...wk }];
+    setWorkers(next); persist(K_WORKERS, next); showToast("已新增工人");
+  };
+  const removeWorker = (id) => {
+    const next = workers.filter((w) => w.id !== id);
+    setWorkers(next); persist(K_WORKERS, next);
+  };
+
+  const setAttendanceStatus = (date, siteId, workerId, status) => {
+    const key = `${siteId}__${workerId}`;
+    const next = { ...attendance, [date]: { ...(attendance[date] || {}), [key]: status } };
+    setAttendance(next); persist(K_ATTEND, next);
+  };
+
+  const markAllPresent = (date, siteId, workerIds) => {
+    const dayRecord = { ...(attendance[date] || {}) };
+    workerIds.forEach((wid) => { dayRecord[`${siteId}__${wid}`] = "全天"; });
+    const next = { ...attendance, [date]: dayRecord };
+    setAttendance(next); persist(K_ATTEND, next);
+    showToast("已全部標記全天");
+  };
+
+  const addDrawing = (dw) => {
+    const next = [{ id: uid(), ...dw }, ...drawings];
+    setDrawings(next); persist(K_DRAWINGS, next); showToast("已新增圖說");
+  };
+  const removeDrawing = (id) => {
+    const next = drawings.filter((d) => d.id !== id);
+    setDrawings(next); persist(K_DRAWINGS, next);
+  };
+
+  const addValuation = (v) => {
+    const next = [{ id: uid(), ...v }, ...valuations];
+    setValuations(next); persist(K_VALUATIONS, next); showToast("已新增估驗");
+  };
+  const removeValuation = (id) => {
+    const next = valuations.filter((v) => v.id !== id);
+    setValuations(next); persist(K_VALUATIONS, next);
+  };
+
+  const resetDemo = async () => {
+    const seed = buildSeed();
+    setSites(seed.sites); setEvents(seed.events); setPhotos(seed.photos);
+    setDocs(seed.docs); setWorkers(seed.workers); setAttendance(seed.attendance);
+    setDrawings(seed.drawings); setValuations(seed.valuations);
+    setAttDate(todayStr());
+    await Promise.all([
+      persist(K_SITES, seed.sites), persist(K_EVENTS, seed.events), persist(K_PHOTOS, seed.photos),
+      persist(K_DOCS, seed.docs), persist(K_WORKERS, seed.workers), persist(K_ATTEND, seed.attendance),
+      persist(K_DRAWINGS, seed.drawings), persist(K_VALUATIONS, seed.valuations),
+    ]);
+    showToast("已清除測試資料");
+  };
+
+  if (view === "splash") return <Splash onDone={() => setView("login")} />;
+  if (view === "login") return <Login onLogin={(acc) => { setAccount(acc); setView("home"); }} />;
+
+  const currentSite = sites.find((s) => s.id === currentSiteId);
+  const currentWorker = workers.find((w) => w.id === currentWorkerId);
+
+  return (
+    <BlueprintBG>
+      <div className="max-w-md mx-auto min-h-screen flex flex-col relative pb-4">
+        {view === "home" && (
+          <HomeHeader account={account} onLogout={() => { setView("login"); setAccount(""); }} />
+        )}
+        {view === "site" && currentSite && (
+          <BackHeader tag="工地現場" title={currentSite.name} subtitle={currentSite.address}
+            onBack={() => { setView("home"); setSiteTab("calendar"); }}
+            stats={{
+              contractAmount: currentSite.contractAmount || 0,
+              estimatedAmount: valuations.filter((v) => v.siteId === currentSiteId).reduce((sum, v) => sum + Number(v.amount || 0), 0),
+            }} />
+        )}
+        {view === "worker" && currentWorker && (
+          <BackHeader tag="個人出勤" title={currentWorker.name} subtitle={currentWorker.note}
+            onBack={() => setView("home")} />
+        )}
+
+        <main className="flex-1 px-4 pt-5 pb-24">
+          {loading ? (
+            <p style={{ color: COLOR.ink }} className="text-center font-bold mt-10 animate-pulse">載入中…</p>
+          ) : view === "home" ? (
+            <HomeView
+              sites={sites}
+              events={events}
+              workers={workers}
+              attendance={attendance}
+              onEnterSite={(id) => { setCurrentSiteId(id); setSiteTab("calendar"); setView("site"); }}
+              onOpenWorker={(id) => { setCurrentWorkerId(id); setWorkerMonth(todayStr().slice(0, 7)); setView("worker"); }}
+              onAddEvent={() => setModal({ type: "event" })}
+              onAddSite={() => setModal({ type: "site" })}
+            />
+          ) : view === "worker" && currentWorker ? (
+            <WorkerDetailView worker={currentWorker} sites={sites} attendance={attendance} monthStr={workerMonth} onMonthChange={setWorkerMonth} />
+          ) : view === "site" && currentSite ? (
+            <>
+              {siteTab === "calendar" && (
+                <CalendarTab
+                  events={events.filter((e) => e.siteId === currentSiteId)}
+                  onAdd={() => setModal({ type: "event", siteId: currentSiteId })}
+                  onRemove={removeEvent}
+                />
+              )}
+              {siteTab === "photos" && (
+                <PhotosTab
+                  photos={photos.filter((p) => p.siteId === currentSiteId)}
+                  onAdd={() => setModal({ type: "photo", siteId: currentSiteId })}
+                  onRemove={removePhoto}
+                />
+              )}
+              {siteTab === "docs" && (
+                <DocsTab
+                  docs={docs.filter((d) => d.siteId === currentSiteId)}
+                  onAdd={() => setModal({ type: "doc", siteId: currentSiteId })}
+                  onToggleStatus={toggleDocStatus}
+                  onRemove={removeDoc}
+                />
+              )}
+              {siteTab === "attendance" && (
+                <AttendanceTab
+                  workers={workers}
+                  attendance={attendance}
+                  siteId={currentSiteId}
+                  date={attDate}
+                  onDateChange={setAttDate}
+                  onCycle={(workerId) => {
+                    const key = `${currentSiteId}__${workerId}`;
+                    const cur = (attendance[attDate] || {})[key] || "未記錄";
+                    const nextStatus = ATTEND_STATUS[(ATTEND_STATUS.indexOf(cur) + 1) % ATTEND_STATUS.length];
+                    setAttendanceStatus(attDate, currentSiteId, workerId, nextStatus);
+                  }}
+                  onAddWorker={() => setModal({ type: "worker" })}
+                  onRemoveWorker={removeWorker}
+                  onMarkAll={() => markAllPresent(attDate, currentSiteId, workers.map((w) => w.id))}
+                />
+              )}
+              {siteTab === "drawings" && (
+                <DrawingsTab
+                  drawings={drawings.filter((d) => d.siteId === currentSiteId)}
+                  onAdd={() => setModal({ type: "drawing", siteId: currentSiteId })}
+                  onRemove={removeDrawing}
+                />
+              )}
+              {siteTab === "valuations" && (
+                <ValuationsTab
+                  valuations={valuations.filter((v) => v.siteId === currentSiteId)}
+                  contractAmount={currentSite.contractAmount || 0}
+                  onAdd={() => setModal({ type: "valuation", siteId: currentSiteId })}
+                  onRemove={removeValuation}
+                />
+              )}
+            </>
+          ) : null}
+        </main>
+
+        {view === "home" && !loading && (
+          <button onClick={resetDemo} style={{ color: COLOR.muted }} className="mx-auto mb-2 flex items-center gap-1 text-xs opacity-70">
+            <RotateCcw size={12} /> 清除測試資料
+          </button>
+        )}
+
+        {view === "site" && (
+          <nav style={{ background: COLOR.surfaceAlt, borderColor: COLOR.red }} className="fixed bottom-0 left-0 right-0 border-t-2">
+            <div className="max-w-md mx-auto grid grid-cols-6">
+              <NavBtn active={siteTab === "calendar"} label="行事曆" icon={Calendar} onClick={() => setSiteTab("calendar")} />
+              <NavBtn active={siteTab === "photos"} label="相簿" icon={ImageIcon} onClick={() => setSiteTab("photos")} />
+              <NavBtn active={siteTab === "docs"} label="收發文" icon={FileText} onClick={() => setSiteTab("docs")} />
+              <NavBtn active={siteTab === "drawings"} label="圖說" icon={Layers} onClick={() => setSiteTab("drawings")} />
+              <NavBtn active={siteTab === "valuations"} label="估驗" icon={DollarSign} onClick={() => setSiteTab("valuations")} />
+              <NavBtn active={siteTab === "attendance"} label="出勤" icon={Users} onClick={() => setSiteTab("attendance")} />
+            </div>
+          </nav>
+        )}
+
+        {toast && (
+          <div style={{ background: COLOR.surface, borderColor: COLOR.border }} className="fixed bottom-24 left-1/2 -translate-x-1/2 border text-white text-sm px-4 py-2 rounded-full shadow-lg z-50">
+            {toast}
+          </div>
+        )}
+
+        {modal?.type === "event" && (
+          <EventModal sites={sites} presetSiteId={modal.siteId} onClose={() => setModal(null)} onSave={(v) => { addEvent(v); setModal(null); }} />
+        )}
+        {modal?.type === "photo" && (
+          <PhotoModal onClose={() => setModal(null)} onSave={(v) => { addPhoto({ ...v, siteId: modal.siteId }); setModal(null); }} />
+        )}
+        {modal?.type === "doc" && (
+          <DocModal onClose={() => setModal(null)} onSave={(v) => { addDoc({ ...v, siteId: modal.siteId }); setModal(null); }} />
+        )}
+        {modal?.type === "drawing" && (
+          <DrawingModal onClose={() => setModal(null)} onSave={(v) => { addDrawing({ ...v, siteId: modal.siteId }); setModal(null); }} />
+        )}
+        {modal?.type === "valuation" && (
+          <ValuationModal onClose={() => setModal(null)} onSave={(v) => { addValuation({ ...v, siteId: modal.siteId }); setModal(null); }} />
+        )}
+        {modal?.type === "worker" && (
+          <WorkerModal onClose={() => setModal(null)} onSave={(v) => { addWorker(v); setModal(null); }} />
+        )}
+        {modal?.type === "site" && (
+          <SiteModal onClose={() => setModal(null)} onSave={(v) => { addSite(v); setModal(null); }} />
+        )}
+      </div>
+    </BlueprintBG>
+  );
+}
+
+
+const rootEl = document.getElementById("root");
+createRoot(rootEl).render(<ConstructionApp />);
+
+</script>
+</body>
+</html>
