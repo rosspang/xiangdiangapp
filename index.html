@@ -1614,7 +1614,7 @@ createRoot(rootEl).render(<ConstructionApp />);
   (async () => {
     try {
       const source = document.getElementById("app-source").textContent;
-      const { code } = Babel.transform(source, { presets: ["react"], filename: "app.jsx" });
+      const { code } = Babel.transform(source, { presets: [["react", { runtime: "classic" }]], filename: "app.jsx" });
       const blob = new Blob([code], { type: "text/javascript" });
       const url = URL.createObjectURL(blob);
       await import(url);
